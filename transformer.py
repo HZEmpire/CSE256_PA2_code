@@ -86,3 +86,18 @@ class TransformerEncoder(nn.Module):
         x = self.forward(x, mask)
         x = x.mean(dim=1)
         return x
+
+class FNNClassifier(nn.Module):
+    def __init__(self, vocab_size, embed_size, hidden_size, output_size, head_num=1, num_layers=1, dropout=0):
+        super(FNNClassifier, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.transformer_encoder = TransformerEncoder(embed_size, head_num, hidden_size, num_layers, dropout)
+        self.fnn = FNN(embed_size, hidden_size, output_size, num_layers, dropout)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        x = self.embedding(x)
+        x = self.transformer_encoder.encode(x, mask)
+        x = self.fnn(x)
+        x = self.softmax(x)
+        return x

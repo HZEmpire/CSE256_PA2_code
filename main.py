@@ -5,11 +5,16 @@ import os
 
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
-
+from transformer import *
 
 seed = 42
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
 """ Hyperparameters to use for training to roughly match 
 the numbers mentioned in the assignment description """
@@ -99,6 +104,43 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     decoderLMmodel.train()
     return perplexity
 
+def train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS):
+    cls = FNNClassifier(tokenizer.vocab_size, n_embd, n_hidden, n_output, n_head, n_layer, dropout=0.1).to(device)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(cls.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', 
+                                                         factor=0.5, patience=2, 
+                                                         verbose=True)
+    cls.to(device)
+    
+    for epoch in range(epochs_CLS):
+        epoch_loss = 0
+        total_correct = 0
+        total_samples = 0
+        
+        for xb, yb in train_CLS_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            outputs = cls(xb)
+            loss = loss_fn(outputs, yb)
+            loss.backward()
+            optimizer.step()
+            
+            # Calculate the total loss and accuracy
+            epoch_loss += loss.item()
+            total_correct += (outputs.argmax(1) == yb).sum().item()
+            total_samples += yb.size(0)
+        
+        # Sum of the loss for the entire epoch
+        avg_loss = epoch_loss / len(train_CLS_loader)
+        accuracy = (total_correct / total_samples) * 100
+        print(f"Epoch {epoch + 1}/{epochs_CLS}, Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
+
+        # Update the learning rate
+        scheduler.step(accuracy)
+
+    return cls
+
 def main():
 
     print("Loading data and creating tokenizer ...")
@@ -116,14 +158,9 @@ def main():
     train_LM_dataset = LanguageModelingDataset(tokenizer, lmtrainText,  block_size)
     train_LM_loader = DataLoader(train_LM_dataset, batch_size=batch_size, shuffle=True)
 
-     # for the classification  task, you will train for a fixed number of epochs like this:
-
-    for epoch in range(epochs_CLS):
-        for xb, yb in train_CLS_loader:
-            xb, yb = xb.to(device), yb.to(device)
-
-            # CLS training code here
-
+    # for the classification task, you will train for a fixed number of epochs like this:
+    # CLS training code here
+    cls = train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS)
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     for i, (xb, yb) in enumerate(train_LM_loader):
