@@ -161,6 +161,10 @@ def main():
     # for the classification task, you will train for a fixed number of epochs like this:
     # CLS training code here
     cls = train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS)
+    test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
+    test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
+    test_accuracy = compute_classifier_accuracy(cls, test_CLS_loader)
+    print(f"Test accuracy: {test_accuracy:.2f}%")
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     for i, (xb, yb) in enumerate(train_LM_loader):

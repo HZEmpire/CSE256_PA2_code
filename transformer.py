@@ -41,46 +41,43 @@ class Attention(nn.Module):
         out = self.fc(out)
         return out
 
-
-class FNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1, dropout=0):
-        super(FNN, self).__init__()
-        assert num_layers >= 1
-        self.layers = nn.ModuleList(
-            [nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ) for i in range(num_layers - 1)])
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, output_size)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        for layer in self.layers:
-            x = layer(x)
-        x = self.fc2(x)
+class TransformerOneLayer(nn.Module):
+    def __init__(self, embed_size, head_num, hidden_size, dropout=0):
+        super(TransformerOneLayer, self).__init__()
+        self.attention = Attention(embed_size, head_num)
+        self.dropout1 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(embed_size)
+        self.fnn = nn.Sequential(
+            nn.Linear(embed_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, embed_size)
+        )
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(embed_size)
+    
+    def forward(self, x, mask=None):
+        # Multi-head attention
+        attn_out = self.attention(x, mask)
+        x = x + self.dropout1(attn_out)
+        x = self.norm1(x)  # Add & Norm
+        # Feedforward
+        ff_out = self.fnn(x)
+        x = x + self.dropout2(ff_out)
+        x = self.norm2(x)  # Add & Norm
         return x
-
 
 class TransformerEncoder(nn.Module):
     def __init__(self, embed_size, head_num, hidden_size, num_layers=1, dropout=0):
         super(TransformerEncoder, self).__init__()
         assert num_layers >= 1
         self.layers = nn.ModuleList(
-            [nn.Sequential(
-                Attention(embed_size, head_num),
-                FNN(embed_size, hidden_size, embed_size, num_layers=1, dropout=dropout)
-            ) for i in range(num_layers)])
-        self.norm = nn.LayerNorm(embed_size)
+            [TransformerOneLayer(embed_size, head_num, hidden_size, dropout)
+            for i in range(num_layers)])
 
     def forward(self, x, mask=None):
         for layer in self.layers:
-            x = layer[0](x, mask) + x
-            x = layer[1](x) + x
-        return self.norm(x)
+            x = layer(x, mask)
+        return x
     
     def encode(self, x, mask=None):
         x = self.forward(x, mask)
@@ -88,15 +85,21 @@ class TransformerEncoder(nn.Module):
         return x
 
 class FNNClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, output_size, head_num=1, num_layers=1, dropout=0):
+    def __init__(self, vocab_size, embed_size, hidden_size, output_size, max_seq_len, head_num=1, num_layers=1, dropout=0):
         super(FNNClassifier, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.pos_embedding = nn.Embedding(max_seq_len, embed_size)
         self.transformer_encoder = TransformerEncoder(embed_size, head_num, hidden_size, num_layers, dropout)
-        self.fnn = FNN(embed_size, hidden_size, output_size, num_layers, dropout)
+        self.fnn = nn.Sequential(
+            nn.Linear(embed_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, output_size)
+        )
         self.softmax = nn.Softmax(dim=-1)
-
+    
     def forward(self, x, mask=None):
-        x = self.embedding(x)
+        positions = torch.arange(0, x.size(1), device=x.device).unsqueeze(0).expand_as(x)
+        x = self.embedding(x) + self.pos_embedding(positions)
         x = self.transformer_encoder.encode(x, mask)
         x = self.fnn(x)
         x = self.softmax(x)
