@@ -123,7 +123,14 @@ def train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS):
             optimizer.zero_grad()
             outputs = cls(xb)
             loss = loss_fn(outputs, yb)
+
+            l2_lambda = 0.001
+            l2_reg = torch.tensor(0.).to(device)
+            for param in cls.parameters():
+                l2_reg += torch.norm(param)
+            loss += l2_lambda * l2_reg
             loss.backward()
+            #torch.nn.utils.clip_grad_norm_(cls.parameters(), max_norm=1.0)
             optimizer.step()
             
             # Calculate the total loss and accuracy
