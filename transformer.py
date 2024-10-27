@@ -30,7 +30,7 @@ class Attention(nn.Module):
         v = self.v(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
 
         # Attention
-        scores = torch.matmul(q, k.permute(0, 1, 3, 2)) / (self.head_dim ** 0.5)  # (B, n_head, T, T)
+        scores = torch.matmul(q, k.permute(0, 1, 3, 2)) / (self.head_dim ** 0.5)  # (N, n_head, T, T)
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(2)  # (N, 1, 1, seq_len)
             scores = scores.masked_fill(mask == 0, float('-inf'))

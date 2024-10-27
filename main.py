@@ -6,6 +6,7 @@ import os
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
 from transformer import *
+from utilities import Utilities
 
 seed = 42
 
@@ -203,6 +204,10 @@ def main():
     test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
     test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
     encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS)
+    # 1.4 Sanity Check
+    utilities = Utilities(tokenizer, encoder)
+    sentence = "This assignment is interesting but time-consuming, making me feel tired."
+    utilities.sanity_check(sentence, block_size)
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     for i, (xb, yb) in enumerate(train_LM_loader):
