@@ -66,22 +66,30 @@ def collate_batch(batch):
     labels = torch.stack(labels)  
     return padded_sequences, labels
 
-def compute_classifier_accuracy(classifier, data_loader):
-    """ Compute the accuracy of the classifier on the data in data_loader."""
+def compute_classifier_accuracy(encoder, classifier, data_loader):
+    """Compute the accuracy of the classifier on the data in data_loader."""
+    encoder.eval()
     classifier.eval()
     total_correct = 0
     total_samples = 0
     with torch.no_grad():
         for X, Y in data_loader:
             X, Y = X.to(device), Y.to(device)
-            outputs = classifier(X)
+            mask = (X != 0).float().to(device)
+
+            # Forward pass through encoder
+            encoder_output, _ = encoder(X)
+            x = (encoder_output * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True)
+
+            # Forward pass through classifier
+            outputs = classifier(x)
             _, predicted = torch.max(outputs.data, 1)
             total_correct += (predicted == Y).sum().item()
             total_samples += Y.size(0)
-        accuracy = (100 * total_correct / total_samples)
-        classifier.train()
-        return accuracy
-
+    accuracy = (100 * total_correct / total_samples)
+    encoder.train()
+    classifier.train()
+    return accuracy
 
 def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     """ Compute the perplexity of the decoderLMmodel on the data in data_loader.
@@ -104,49 +112,74 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     decoderLMmodel.train()
     return perplexity
 
-def train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS):
-    cls = FNNClassifier(tokenizer.vocab_size, n_embd, n_hidden, n_output, n_head, n_layer, dropout=0.1).to(device)
-    loss_fn = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(cls.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', 
-                                                         factor=0.5, patience=2, 
-                                                         verbose=True)
-    cls.to(device)
+def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS):
+    def create_mask(x):
+        # x: (batch_size, seq_len)
+        mask = (x != 0).float()
+        return mask
+
+    # Initialize the Encoder
+    encoder = TransformerEncoder(
+        vocab_size=tokenizer.vocab_size,
+        n_embd=n_embd,
+        n_head=n_head,
+        n_layer=n_layer,
+        max_seq_len=block_size
+    ).to(device)
+
+    # Initialize the Classifier
+    classifier = FNNClassifier(
+        n_input=n_embd,
+        n_hidden=n_hidden,
+        n_output=n_output
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        list(encoder.parameters()) + list(classifier.parameters()),
+        lr=learning_rate,
+        weight_decay=1e-4
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
     
     for epoch in range(epochs_CLS):
         epoch_loss = 0
         total_correct = 0
         total_samples = 0
-        
+
         for xb, yb in train_CLS_loader:
             xb, yb = xb.to(device), yb.to(device)
+            mask = create_mask(xb)
+
+            encoder_output, _ = encoder(xb)  # Encode the input
+            x = (encoder_output * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True)   # Average the encoder output
+            outputs = classifier(x)          # Get the classifier output
+
+            loss = criterion(outputs, yb)    # Loss
+
+            # Optimize
             optimizer.zero_grad()
-            outputs = cls(xb)
-            loss = loss_fn(outputs, yb)
-
-            l2_lambda = 0.001
-            l2_reg = torch.tensor(0.).to(device)
-            for param in cls.parameters():
-                l2_reg += torch.norm(param)
-            loss += l2_lambda * l2_reg
             loss.backward()
-            #torch.nn.utils.clip_grad_norm_(cls.parameters(), max_norm=1.0)
             optimizer.step()
-            
-            # Calculate the total loss and accuracy
+
+            # Compute statistics
             epoch_loss += loss.item()
-            total_correct += (outputs.argmax(1) == yb).sum().item()
+            _, predicted = torch.max(outputs.data, 1)
+            total_correct += (predicted == yb).sum().item()
             total_samples += yb.size(0)
-        
-        # Sum of the loss for the entire epoch
-        avg_loss = epoch_loss / len(train_CLS_loader)
-        accuracy = (total_correct / total_samples) * 100
-        print(f"Epoch {epoch + 1}/{epochs_CLS}, Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
 
-        # Update the learning rate
-        scheduler.step(accuracy)
+        epoch_accuracy = 100 * total_correct / total_samples
+        epoch_loss_avg = epoch_loss / len(train_CLS_loader)
 
-    return cls
+        # Compute test accuracy
+        test_accuracy = compute_classifier_accuracy(encoder, classifier, test_CLS_loader)
+        print(f"Epoch [{epoch+1}/{epochs_CLS}], Loss: {epoch_loss_avg:.4f}, "
+              f"Train Accuracy: {epoch_accuracy:.2f}%, Test Accuracy: {test_accuracy:.2f}%")
+
+        # Adjust learning rate
+        scheduler.step(epoch_loss_avg)
+    
+    return encoder, classifier
 
 def main():
 
@@ -167,11 +200,9 @@ def main():
 
     # for the classification task, you will train for a fixed number of epochs like this:
     # CLS training code here
-    cls = train_CLS_model(tokenizer, train_CLS_loader, epochs_CLS)
     test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
     test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
-    test_accuracy = compute_classifier_accuracy(cls, test_CLS_loader)
-    print(f"Test accuracy: {test_accuracy:.2f}%")
+    encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS)
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     for i, (xb, yb) in enumerate(train_LM_loader):
@@ -179,10 +210,6 @@ def main():
             break
         xb, yb = xb.to(device), yb.to(device)
         # LM training code here
-
-    
-
-
 
 if __name__ == "__main__":
     main()

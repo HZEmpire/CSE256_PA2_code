@@ -5,102 +5,103 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 class Attention(nn.Module):
-    def __init__(self, embed_size, head_num):
+    """ Multi-head self-attention module """
+    def __init__(self, n_embd, n_head):
         super(Attention, self).__init__()
-        assert embed_size % head_num == 0
-        self.embed_size = embed_size
-        self.head_num = head_num
-        self.head_dim = embed_size // head_num
+        assert n_embd % n_head == 0
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head
 
         # Separate Q, K, V layers for each attention head
-        self.q = nn.Linear(embed_size, embed_size, bias=False)
-        self.k = nn.Linear(embed_size, embed_size, bias=False)
-        self.v = nn.Linear(embed_size, embed_size, bias=False)
-        self.fc = nn.Linear(embed_size, embed_size)
+        self.q = nn.Linear(n_embd, n_embd)
+        self.k = nn.Linear(n_embd, n_embd)
+        self.v = nn.Linear(n_embd, n_embd)
+        self.fc = nn.Linear(n_embd, n_embd)
 
     def forward(self, x, mask=None):
-        N, seq_len, num_features = x.shape
+        N, seq_len, num_features = x.size()
 
         # Split the embedding into heads
-        q = self.q(x).reshape(N, seq_len, self.head_num, self.head_dim).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(N, seq_len, self.head_num, self.head_dim).permute(0, 2, 1, 3)
-        v = self.v(x).reshape(N, seq_len, self.head_num, self.head_dim).permute(0, 2, 1, 3)
+        q = self.q(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+        k = self.k(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+        v = self.v(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
 
-        # Calculate
-        score = torch.matmul(q, k.permute(0, 1, 3, 2)) / np.sqrt(self.head_dim)
+        # Attention
+        scores = torch.matmul(q, k.permute(0, 1, 3, 2)) / (self.head_dim ** 0.5)  # (B, n_head, T, T)
         if mask is not None:
-            mask = mask.unsqueeze(1)  # (batch_size, 1, seq_len, seq_len)
-            score = score.masked_fill(mask == 0, float('-inf'))
-        weight = F.softmax(score, dim=-1)
-        # Perhaps we can add dropout here
-        # weight = self.dropout(weight)
-        out = torch.matmul(weight, v).permute(0, 2, 1, 3).reshape(N, seq_len, self.embed_size)
+            mask = mask.unsqueeze(1).unsqueeze(2)  # (N, 1, 1, seq_len)
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+        weights = F.softmax(scores, dim=-1)
+        out = torch.matmul(weights, v)
+        out = out.transpose(1, 2).contiguous().view(N, seq_len, self.n_embd)
         out = self.fc(out)
-        return out
 
-class TransformerOneLayer(nn.Module):
-    def __init__(self, embed_size, head_num, hidden_size, dropout=0):
-        super(TransformerOneLayer, self).__init__()
-        self.attention = Attention(embed_size, head_num)
-        self.dropout1 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(embed_size)
-        self.fnn = nn.Sequential(
-            nn.Linear(embed_size, hidden_size),
+        return out, weights  # Return output and attention probabilities
+
+
+class TransformerEncoderLayer(nn.Module):
+    """ A single Transformer encoder layer """
+    def __init__(self, n_embd, n_head):
+        super(TransformerEncoderLayer, self).__init__()
+        self.self_attn = Attention(n_embd, n_head)
+        self.norm1 = nn.LayerNorm(n_embd)
+        self.ffn = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
             nn.GELU(),
-            nn.Linear(hidden_size, embed_size)
+            nn.Linear(4 * n_embd, n_embd)
         )
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(embed_size)
-    
+        self.norm2 = nn.LayerNorm(n_embd)
+
     def forward(self, x, mask=None):
-        # Multi-head attention
-        attn_out = self.attention(x, mask)
-        x = x + self.dropout1(attn_out)
-        x = self.norm1(x)  # Add & Norm
-        # Feedforward
-        ff_out = self.fnn(x)
-        x = x + self.dropout2(ff_out)
-        x = self.norm2(x)  # Add & Norm
-        return x
+        out, weights = self.self_attn(x, mask)
+        x = x + out  # Residual connection
+        x = self.norm1(x)  # Layer normalization
+
+        ffn_out= self.ffn(x)
+        x = x + ffn_out  # Residual connection
+        x = self.norm2(x)  # Layer normalization
+
+        return x, weights  # Return output and attention probabilities
+
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, embed_size, head_num, hidden_size, num_layers=1, dropout=0):
+    """ Transformer Encoder consisting of multiple encoder layers """
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len):
         super(TransformerEncoder, self).__init__()
-        assert num_layers >= 1
-        self.layers = nn.ModuleList(
-            [TransformerOneLayer(embed_size, head_num, hidden_size, dropout)
-            for i in range(num_layers)])
+        self.token_emb = nn.Embedding(vocab_size, n_embd)  # Token embeddings
+        self.pos_emb = nn.Embedding(max_seq_len, n_embd)  # Positional embeddings
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(n_embd, n_head) for _ in range(n_layer)
+        ])
+        self.norm = nn.LayerNorm(n_embd)
 
     def forward(self, x, mask=None):
+        N, seq_len = x.size()
+        positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0)
+        x = self.token_emb(x) + self.pos_emb(positions)  # Add token and positional embeddings
+
+        weights_list = []  # To store attention probabilities from each layer
         for layer in self.layers:
-            x = layer(x, mask)
-        return x
-    
-    def encode(self, x, mask=None):
-        x = self.forward(x, mask)
-        x = x.mean(dim=1)
-        return x
+            x, attn_probs = layer(x, mask)  # Process through each layer
+            weights_list.append(attn_probs)
+
+        x = self.norm(x)  # Final layer normalization
+        return x, weights_list  # Return output embeddings and attention probabilities
+
 
 class FNNClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, output_size, max_seq_len, head_num=1, num_layers=1, dropout=0):
+    """ Feedforward Neural Network Classifier """
+    def __init__(self, n_input, n_hidden, n_output):
         super(FNNClassifier, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_size)
-        self.pos_embedding = nn.Embedding(max_seq_len, embed_size)
-        self.transformer_encoder = TransformerEncoder(embed_size, head_num, hidden_size, num_layers, dropout)
-        self.fnn = nn.Sequential(
-            nn.Linear(embed_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, output_size)
-        )
-        self.softmax = nn.Softmax(dim=-1)
-    
-    def forward(self, x, mask=None):
-        positions = torch.arange(0, x.size(1), device=x.device).unsqueeze(0).expand_as(x)
-        x = self.embedding(x) + self.pos_embedding(positions)
-        x = self.transformer_encoder.encode(x, mask)
-        x = self.fnn(x)
-        x = self.softmax(x)
-        return x
+        self.fc1 = nn.Linear(n_input, n_hidden)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(n_hidden, n_output)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x  # Output logits
