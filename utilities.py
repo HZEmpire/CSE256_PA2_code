@@ -20,7 +20,7 @@ class Utilities:
         input_tensor = input_tensor.to(device)
 
         # Create attention mask
-        attention_mask = (input_tensor != 0).float().to(device)
+        attention_mask = (input_tensor == 0).bool().to(device)
 
         # Display input tensor shape
         print("Input tensor shape:", input_tensor.shape)
