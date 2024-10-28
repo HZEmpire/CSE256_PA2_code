@@ -109,7 +109,7 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
             loss = criterion(logits, Y)
             total_loss += loss.item()
             total_tokens += Y.size(0)
-            if i+1 >= eval_iters:
+            if (i + 1) >= eval_iters:
                 break
     avg_loss = total_loss / total_tokens
     perplexity = torch.exp(torch.tensor(avg_loss))
@@ -186,7 +186,7 @@ def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS):
     
     return encoder, classifier
 
-def train_LM_model(tokenizer, train_LM_loader, test_LM_loader, max_iters):
+def train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters):
     # Initialize the Decoder
     decoder = TransformerDecoder(
         vocab_size=tokenizer.vocab_size,
@@ -205,8 +205,8 @@ def train_LM_model(tokenizer, train_LM_loader, test_LM_loader, max_iters):
 
     # Training loop
     total_steps = 0
+    total_loss = 0.0
     decoder.train()
-    epoch_loss = 0
 
     for i, (xb, yb) in enumerate(train_LM_loader):
         if total_steps >= max_iters:
@@ -215,26 +215,29 @@ def train_LM_model(tokenizer, train_LM_loader, test_LM_loader, max_iters):
         optimizer.zero_grad()
 
         # Forward pass through the decoder
-        logits, _ = decoder(xb)  # logits shape: (batch_size, seq_len, vocab_size)
-        logits = logits.view(-1, logits.size(-1))  # Reshape for loss computation
-        yb = yb.view(-1)  # Flatten target tokens
+        logits, _ = decoder(xb)
+        logits = logits.view(-1, logits.size(-1))
+        yb = yb.view(-1)
 
         loss = criterion(logits, yb)
         loss.backward()
         optimizer.step()
 
-        epoch_loss += loss.item()
+        total_loss += loss.item()
         total_steps += 1
 
-        # Every 50 iterations, compute and print perplexity
-        if total_steps % 50 == 0:
-            avg_loss = epoch_loss / total_steps
-            perplexity = torch.exp(torch.tensor(avg_loss))
-            print(f"Iteration [{total_steps}/{max_iters}], Loss: {avg_loss:.4f}, Perplexity: {perplexity:.2f}")
+        # Every 100 iterations, compute and print perplexity
+        if total_steps % 100 == 0:
+            avg_loss = total_loss / total_steps
+            train_perplexity = compute_perplexity(decoder, train_LM_loader, eval_iters)
+            print(f"Iteration [{total_steps}/{max_iters}], "
+                  f"Loss: {avg_loss:.4f}, Train Perplexity: {train_perplexity:.2f}")
 
-    # After training, compute test perplexity
-    test_perplexity = compute_perplexity(decoder, test_LM_loader, eval_iters)
-    print(f"Test Perplexity: {test_perplexity:.2f}")
+            # Compute test perplexities
+            for name, test_loader in test_LM_loaders.items():
+                test_perplexity = compute_perplexity(decoder, test_loader, eval_iters)
+                print(f"Test Perplexity on {name}: {test_perplexity:.2f}")
+            print("-" * 50)
 
     # Return the trained decoder
     return decoder
@@ -270,9 +273,22 @@ def main():
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     # LM training code here
-    test_LM_dataset = LanguageModelingDataset(tokenizer, lmtrainText, block_size)
-    test_LM_loader = DataLoader(test_LM_dataset, batch_size=batch_size, shuffle=False)
-    decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loader, max_iters)
+    test_files = {
+        "Obama": "speechesdataset/test_LM_obama.txt",
+        "H_Bush": "speechesdataset/test_LM_hbush.txt",
+        "W_Bush": "speechesdataset/test_LM_wbush.txt"
+    }
+    test_LM_loaders = {}
+    for name, filepath in test_files.items():
+        with open(filepath, 'r', encoding='utf-8') as f:
+            test_text = f.read()
+        test_dataset = LanguageModelingDataset(tokenizer, test_text, block_size)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        test_LM_loaders[name] = test_loader
+    decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters)
+    utilities = Utilities(tokenizer, decoder)
+    sentence = "Let see what is the next step."
+    utilities.sanity_check(' '.join(sentence.split()[:-1]), block_size)
 
 if __name__ == "__main__":
     main()

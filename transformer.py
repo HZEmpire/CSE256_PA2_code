@@ -160,23 +160,22 @@ class TransformerDecoder(nn.Module):
         self.norm = nn.LayerNorm(n_embd)
         self.fc_out = nn.Linear(n_embd, vocab_size)  # Output layer to predict next token
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         N, seq_len = x.size()
         positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(N, seq_len)
         x = self.token_emb(x) + self.pos_emb(positions)  # Add token and positional embeddings
 
         # Mask future tokens
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-        attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, seq_len, seq_len)
+        if mask is None:
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+            mask = mask.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, seq_len, seq_len)
 
         weights_list = []  # To store attention probabilities from each layer
         for layer in self.layers:
-            x, attn_weights = layer(x, mask=attn_mask)
+            x, attn_weights = layer(x, mask=mask)
             weights_list.append(attn_weights)
 
         x = self.norm(x)  # Final layer normalization
         x = self.fc_out(x)  # Output logits for each token position
 
         return x, weights_list  # Return logits and attention weights
-
-
