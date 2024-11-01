@@ -204,10 +204,136 @@ class DisentangledAttention(nn.Module):
         out = self.fc(out)
 
         return out, weights
+    
+# New Local Window Attention Class
+class LocalAttention(nn.Module):
+    """Multi-head self-attention with local window attention."""
+    def __init__(self, n_embd, n_head, window_size):
+        super(LocalAttention, self).__init__()
+        assert n_embd % n_head == 0
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head
+        self.window_size = window_size
 
+        # Q, K, V layers
+        self.q = nn.Linear(n_embd, n_embd)
+        self.k = nn.Linear(n_embd, n_embd)
+        self.v = nn.Linear(n_embd, n_embd)
+        self.fc = nn.Linear(n_embd, n_embd)
+
+    def forward(self, x, mask=None):
+        N, seq_len, num_features = x.size()
+
+        # Split embeddings into heads
+        q = self.q(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # (N, n_head, seq_len, head_dim)
+        k = self.k(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+        v = self.v(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+
+        # Compute attention scores
+        scores = torch.matmul(q, k.permute(0, 1, 3, 2)) / math.sqrt(self.head_dim)  # (N, n_head, seq_len, seq_len)
+
+        # Create local mask where positions outside the window are masked
+        # Mask shape: (1, 1, seq_len, seq_len)
+        positions = torch.arange(seq_len, device=x.device, dtype=torch.int32) ######## Must be int32 otherwise mps will fail
+        distance_matrix = torch.abs(positions.unsqueeze(0) - positions.unsqueeze(1))  # (seq_len, seq_len)
+        local_mask = distance_matrix > self.window_size  # (seq_len, seq_len)
+        local_mask = local_mask.unsqueeze(0).unsqueeze(1)  # (1, 1, seq_len, seq_len)
+        scores = scores.masked_fill(local_mask, float('-inf'))
+
+        if mask is not None:
+            # Adjust mask shape to match scores
+            if mask.dim() == 2:
+                # Mask shape: (batch_size, seq_len), expand to (batch_size, 1, 1, seq_len)
+                mask = mask.unsqueeze(1).unsqueeze(2)
+            elif mask.dim() == 3:
+                # Mask shape: (batch_size, 1, seq_len), expand to (batch_size, 1, seq_len, seq_len)
+                mask = mask.unsqueeze(1)
+            elif mask.dim() == 4:
+                # Mask shape: (batch_size, 1, seq_len, seq_len) or (1, 1, seq_len, seq_len)
+                pass
+            else:
+                raise ValueError("Invalid mask shape")
+
+            mask = mask.to(scores.device)
+            scores = scores.masked_fill(mask, float('-inf'))
+
+        weights = F.softmax(scores, dim=-1)
+        out = torch.matmul(weights, v)  # (N, n_head, seq_len, head_dim)
+        out = out.transpose(1, 2).contiguous().view(N, seq_len, self.n_embd)
+        out = self.fc(out)
+
+        return out, weights  # Return output and attention scores (for consistency)
+
+
+# New Blockwise Attention Class
+class BlockwiseAttention(nn.Module):
+    """Multi-head self-attention with blockwise attention."""
+    def __init__(self, n_embd, n_head, block_size):
+        super(BlockwiseAttention, self).__init__()
+        assert n_embd % n_head == 0, "n_embd must be divisible by n_head"
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head
+        self.block_size = block_size
+
+        # Q, K, V layers
+        self.q = nn.Linear(n_embd, n_embd)
+        self.k = nn.Linear(n_embd, n_embd)
+        self.v = nn.Linear(n_embd, n_embd)
+        self.fc = nn.Linear(n_embd, n_embd)
+
+    def forward(self, x, mask=None):
+        N, seq_len, _ = x.size()
+
+        # Calculate for each block，use torch.div to avoid floordiv warning
+        block_indices = torch.div(torch.arange(seq_len, device=x.device), self.block_size, rounding_mode='floor')  # [seq_len]
+
+        # Create block mask to mask attention between different blocks
+        block_mask = (block_indices.unsqueeze(0) != block_indices.unsqueeze(1))  # [seq_len, seq_len]
+
+        # Expand block mask to match scores shape
+        block_mask = block_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, seq_len, seq_len]
+        print(block_mask[0][0])
+        # Split embeddings into heads
+        q = self.q(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # [N, n_head, seq_len, head_dim]
+        k = self.k(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+        v = self.v(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [N, n_head, seq_len, seq_len]
+        scores = scores.masked_fill(block_mask, float('-inf'))
+
+        if mask is not None:
+            # Adjust mask shape to match scores
+            if mask.dim() == 2:
+                # Mask shape: (batch_size, seq_len), expand to (batch_size, 1, 1, seq_len)
+                mask = mask.unsqueeze(1).unsqueeze(2)
+            elif mask.dim() == 3:
+                # Mask shape: (batch_size, 1, seq_len), expand to (batch_size, 1, seq_len, seq_len)
+                mask = mask.unsqueeze(1)
+            elif mask.dim() == 4:
+                # Mask shape: (batch_size, 1, seq_len, seq_len) or (1, 1, seq_len, seq_len)
+                pass
+            else:
+                raise ValueError("Invalid mask shape")
+
+            mask = mask.to(scores.device)
+            scores = scores.masked_fill(mask, float('-inf'))
+
+        # Compute attention weights
+        weights = F.softmax(scores, dim=-1)  # [N, n_head, seq_len, seq_len]
+        out = torch.matmul(weights, v)  # [N, n_head, seq_len, head_dim]
+        out = out.transpose(1, 2).contiguous().view(N, seq_len, self.n_embd)  # [N, seq_len, n_embd]
+        out = self.fc(out)  # [N, seq_len, n_embd]
+
+        return out, weights  # Return output and attention scores
+
+
+# Modify TransformerEncoderLayer and TransformerDecoderLayer to include the new attention methods
 class TransformerEncoderLayer(nn.Module):
     """A single Transformer encoder layer with selectable attention method."""
-    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512):
+    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8):
         super(TransformerEncoderLayer, self).__init__()
         if method == 'standard':
             self.self_attn = Attention(n_embd, n_head)
@@ -215,8 +341,12 @@ class TransformerEncoderLayer(nn.Module):
             self.self_attn = AliBiAttention(n_embd, n_head)
         elif method == 'disentangled':
             self.self_attn = DisentangledAttention(n_embd, n_head, max_seq_len)
+        elif method == 'local':
+            self.self_attn = LocalAttention(n_embd, n_head, window_size)
+        elif method == 'block':
+            self.self_attn = BlockwiseAttention(n_embd, n_head, block_size)
         else:
-            raise ValueError("Invalid method. Choose 'standard', 'alibi', or 'disentangled'.")
+            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', or 'block'.")
 
         self.norm1 = nn.LayerNorm(n_embd)
         self.ffn = nn.Sequential(
@@ -239,25 +369,25 @@ class TransformerEncoderLayer(nn.Module):
 
 class TransformerEncoder(nn.Module):
     """Transformer Encoder consisting of multiple encoder layers."""
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='standard'):
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='standard', window_size=4, block_size=8):
         super(TransformerEncoder, self).__init__()
         self.method = method
         self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(vocab_size, n_embd)  # Token embeddings
 
-        if method == 'standard' or method == 'disentangled':
+        if method in ['standard', 'disentangled', 'local', 'block']:
             self.pos_emb = nn.Embedding(max_seq_len, n_embd)  # Positional embeddings
         # No positional embeddings for AliBi in the embedding layer
 
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(n_embd, n_head, method, max_seq_len) for _ in range(n_layer)
+            TransformerEncoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size) for _ in range(n_layer)
         ])
         self.norm = nn.LayerNorm(n_embd)
 
     def forward(self, x, mask=None):
         N, seq_len = x.size()
         x = self.token_emb(x)
-        if self.method == 'standard' or self.method == 'disentangled':
+        if self.method in ['standard', 'disentangled', 'local', 'block']:
             positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0)
             x = x + self.pos_emb(positions)  # Add positional embeddings
 
@@ -269,23 +399,9 @@ class TransformerEncoder(nn.Module):
         x = self.norm(x)
         return x, weights_list  # Return output embeddings and attention probabilities
 
-class FNNClassifier(nn.Module):
-    """Feedforward Neural Network Classifier."""
-    def __init__(self, n_input, n_hidden, n_output):
-        super(FNNClassifier, self).__init__()
-        self.fc1 = nn.Linear(n_input, n_hidden)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(n_hidden, n_output)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x  # Output logits
-
 class TransformerDecoderLayer(nn.Module):
     """A single Transformer decoder layer with selectable attention method."""
-    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512):
+    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8):
         super(TransformerDecoderLayer, self).__init__()
         if method == 'standard':
             self.self_attn = Attention(n_embd, n_head)
@@ -293,8 +409,12 @@ class TransformerDecoderLayer(nn.Module):
             self.self_attn = AliBiAttention(n_embd, n_head)
         elif method == 'disentangled':
             self.self_attn = DisentangledAttention(n_embd, n_head, max_seq_len)
+        elif method == 'local':
+            self.self_attn = LocalAttention(n_embd, n_head, window_size)
+        elif method == 'block':
+            self.self_attn = BlockwiseAttention(n_embd, n_head, block_size)
         else:
-            raise ValueError("Invalid method. Choose 'standard', 'alibi', or 'disentangled'.")
+            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', or 'block'.")
 
         self.norm1 = nn.LayerNorm(n_embd)
         self.ffn = nn.Sequential(
@@ -317,18 +437,18 @@ class TransformerDecoderLayer(nn.Module):
 
 class TransformerDecoder(nn.Module):
     """Transformer Decoder consisting of multiple decoder layers."""
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='disentangled'):
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='local', window_size=4, block_size=8):
         super(TransformerDecoder, self).__init__()
         self.method = method
         self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(vocab_size, n_embd)  # Token embeddings
 
-        if method == 'standard' or method == 'disentangled':
+        if method in ['standard', 'disentangled', 'local', 'block']:
             self.pos_emb = nn.Embedding(max_seq_len, n_embd)  # Positional embeddings
         # No positional embeddings for AliBi in the embedding layer
 
         self.layers = nn.ModuleList([
-            TransformerDecoderLayer(n_embd, n_head, method, max_seq_len) for _ in range(n_layer)
+            TransformerDecoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size) for _ in range(n_layer)
         ])
         self.norm = nn.LayerNorm(n_embd)
         self.fc_out = nn.Linear(n_embd, vocab_size)  # Output layer to predict next token
@@ -336,7 +456,7 @@ class TransformerDecoder(nn.Module):
     def forward(self, x, mask=None):
         N, seq_len = x.size()
         x = self.token_emb(x)
-        if self.method == 'standard' or self.method == 'disentangled':
+        if self.method in ['standard', 'disentangled', 'local', 'block']:
             positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(N, seq_len)
             x = x + self.pos_emb(positions)  # Add positional embeddings
 
