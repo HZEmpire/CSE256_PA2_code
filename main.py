@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import os
+import argparse
 
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
@@ -117,7 +118,10 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     return perplexity.item()
 
 
-def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS):
+def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='standard'):
+    """
+    Train the classifier model on the training data and evaluate on the test data.
+    """
     def create_mask(x):
         # x: (batch_size, seq_len)
         mask = (x != 0).float()
@@ -129,7 +133,8 @@ def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS):
         n_embd=n_embd,
         n_head=n_head,
         n_layer=n_layer,
-        max_seq_len=block_size
+        max_seq_len=block_size,
+        method=method
     ).to(device)
 
     # Initialize the Classifier
@@ -186,14 +191,18 @@ def train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS):
     
     return encoder, classifier
 
-def train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters):
+def train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='standard'):
+    """
+    Train the decoder model on the training data and evaluate on the test data.
+    """
     # Initialize the Decoder
     decoder = TransformerDecoder(
         vocab_size=tokenizer.vocab_size,
         n_embd=n_embd,
         n_head=n_head,
         n_layer=n_layer,
-        max_seq_len=block_size
+        max_seq_len=block_size,
+        method=method
     ).to(device)
 
     # Define loss function and optimizer
@@ -243,6 +252,9 @@ def train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters):
     return decoder
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", "-m", type=str, default="part1", help="Choose the part of the assignment to run, 'part1' or 'part2' or 'part3'")
+    args = parser.parse_args()
 
     print("Loading data and creating tokenizer ...")
     texts = load_texts('speechesdataset')
@@ -261,34 +273,96 @@ def main():
 
     # for the classification task, you will train for a fixed number of epochs like this:
     # CLS training code here
-    """
-    test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
-    test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
-    encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS)
-    # 1.4 Sanity Check
-    utilities = Utilities(tokenizer, encoder)
-    sentence = "This assignment is interesting but time-consuming, making me feel tired."
-    utilities.sanity_check(sentence, block_size)
-    """
+    if args.mode == "part1":
+        test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
+        test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS)
+        # 1.4 Sanity Check
+        utilities = Utilities(tokenizer, encoder)
+        sentence = "This task is interesting but hard, making me feel tired."
+        utilities.sanity_check(sentence, block_size)
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     # LM training code here
-    test_files = {
-        "Obama": "speechesdataset/test_LM_obama.txt",
-        "H_Bush": "speechesdataset/test_LM_hbush.txt",
-        "W_Bush": "speechesdataset/test_LM_wbush.txt"
-    }
-    test_LM_loaders = {}
-    for name, filepath in test_files.items():
-        with open(filepath, 'r', encoding='utf-8') as f:
-            test_text = f.read()
-        test_dataset = LanguageModelingDataset(tokenizer, test_text, block_size)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-        test_LM_loaders[name] = test_loader
-    decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters)
-    utilities = Utilities(tokenizer, decoder)
-    sentence = "Let see what is the next step."
-    utilities.sanity_check(' '.join(sentence.split()[:-1]), block_size)
+    elif args.mode == "part2":
+        test_files = {
+            "Obama": "speechesdataset/test_LM_obama.txt",
+            "H_Bush": "speechesdataset/test_LM_hbush.txt",
+            "W_Bush": "speechesdataset/test_LM_wbush.txt"
+        }
+        test_LM_loaders = {}
+        for name, filepath in test_files.items():
+            with open(filepath, 'r', encoding='utf-8') as f:
+                test_text = f.read()
+            test_dataset = LanguageModelingDataset(tokenizer, test_text, block_size)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            test_LM_loaders[name] = test_loader
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters)
+        utilities = Utilities(tokenizer, decoder)
+        sentence = "Let us see what will be the next word predicted."
+        utilities.sanity_check(' '.join(sentence.split()[:-1]), block_size)
+
+    # Test the special methods
+    elif args.mode == "part3":
+        test_files = {
+            "Obama": "speechesdataset/test_LM_obama.txt",
+            "H_Bush": "speechesdataset/test_LM_hbush.txt",
+            "W_Bush": "speechesdataset/test_LM_wbush.txt"
+        }
+        test_LM_loaders = {}
+        for name, filepath in test_files.items():
+            with open(filepath, 'r', encoding='utf-8') as f:
+                test_text = f.read()
+            test_dataset = LanguageModelingDataset(tokenizer, test_text, block_size)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            test_LM_loaders[name] = test_loader
+        print("-" * 80)
+        print("The special methods are train on the decoding task.")
+        print("-" * 80)
+        # Positional Encoding: Alibi method
+        print("-" * 30, "Alibi Method", "-" * 30)
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='alibi')
+       
+        # Sparse Attention Patterns: Local Window Method, Blockwise method
+        print("-" * 30, "Local Window Method", "-" * 30)
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='local')
+        print("-" * 30, "Blockwise Method", "-" * 30)
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='block')
+    
+        # Disentangled Attention Patterns method
+        print("-" * 30, "Disentangled Attention Patterns Method", "-" * 30)
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='disentangled')
+        
+        # Other special methods
+        print("-" * 30, "Performer Attention Method", "-" * 30)
+        decoder = train_LM_model(tokenizer, train_LM_loader, test_LM_loaders, max_iters, method='performer')
+        
+        test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
+        test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size, collate_fn=collate_batch, shuffle=False)
+        print("-" * 80)
+        print("The special methods are train on the classification task.")
+        print("-" * 80)
+        # Positional Encoding: Alibi method
+        print("-" * 30, "Alibi Method", "-" * 30)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='alibi')
+
+        # Sparse Attention Patterns: Local Window Method, Blockwise method
+        print("-" * 30, "Local Window Method", "-" * 30)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='local')
+        print("-" * 30, "Blockwise Method", "-" * 30)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='block')
+
+        # Disentangled Attention Patterns method
+        print("-" * 30, "Disentangled Attention Patterns Method", "-" * 30)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='disentangled')
+
+        # Other special methods
+        print("-" * 30, "Performer Attention Method", "-" * 30)
+        encoder, classifier = train_CLS_model(tokenizer, train_CLS_loader, test_CLS_loader, epochs_CLS, method='performer')
+
+    # Invalid mode
+    else:
+        print("Invalid mode. Please choose 'part1', 'part2' or 'part3' by using the --mode or -m argument.")
 
 if __name__ == "__main__":
     main()

@@ -294,7 +294,6 @@ class BlockwiseAttention(nn.Module):
 
         # Expand block mask to match scores shape
         block_mask = block_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, seq_len, seq_len]
-        print(block_mask[0][0])
         # Split embeddings into heads
         q = self.q(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # [N, n_head, seq_len, head_dim]
         k = self.k(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)
@@ -329,11 +328,74 @@ class BlockwiseAttention(nn.Module):
 
         return out, weights  # Return output and attention scores
 
+# Linear time Performer Attention
+class PerformerAttention(nn.Module):
+    """Performer Attention with Linear Complexity using FAVOR+."""
+    def __init__(self, n_embd, n_head, kernel_dim=256, causal=False):
+        super(PerformerAttention, self).__init__()
+        assert n_embd % n_head == 0, "n_embd must be divisible by n_head"
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head
+        self.kernel_dim = kernel_dim
+        self.causal = causal
 
+        # Q, K, V layers
+        self.q = nn.Linear(n_embd, n_embd, bias=False)
+        self.k = nn.Linear(n_embd, n_embd, bias=False)
+        self.v = nn.Linear(n_embd, n_embd, bias=False)
+        self.fc = nn.Linear(n_embd, n_embd, bias=False)
+
+        # Random projection for Kernel feature mapping
+        self.random_projection = nn.Linear(self.head_dim, self.kernel_dim, bias=False)
+        nn.init.normal_(self.random_projection.weight, mean=0.0, std=1.0 / math.sqrt(self.kernel_dim))
+
+    def forward(self, x, mask=None):
+        N, seq_len, _ = x.size()
+
+        # Project inputs to Q, K, V
+        Q = self.q(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # [N, n_head, seq_len, head_dim]
+        K = self.k(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # [N, n_head, seq_len, head_dim]
+        V = self.v(x).reshape(N, seq_len, self.n_head, self.head_dim).permute(0, 2, 1, 3)  # [N, n_head, seq_len, head_dim]
+
+        # Apply random feature mapping (Φ)
+        Q = self._feature_map(Q)  # [N, n_head, seq_len, kernel_dim]
+        K = self._feature_map(K)  # [N, n_head, seq_len, kernel_dim]
+
+        # Compute Φ(K)^T V
+        # K: [N, n_head, seq_len, kernel_dim]
+        # V: [N, n_head, seq_len, head_dim]
+        # KV: [N, n_head, kernel_dim, head_dim]
+        KV = torch.einsum("nhsk,nhsd->nhkd", K, V)  # Corrected einsum
+
+        # Compute Φ(Q) (Φ(K)^T V)
+        # Q: [N, n_head, seq_len, kernel_dim]
+        # KV: [N, n_head, kernel_dim, head_dim]
+        # out: [N, n_head, seq_len, head_dim]
+        out = torch.einsum("nhsk,nhkd->nhsd", Q, KV)  # Corrected einsum
+
+        # Compute Φ(Q) Φ(K)^T 1
+        # Φ(K)^T 1 = Φ(K).sum(dim=2) = [N, n_head, kernel_dim]
+        # Φ(Q) @ (Φ(K)^T 1) = [N, n_head, seq_len, kernel_dim] * [N, n_head, kernel_dim] -> [N, n_head, seq_len]
+        denom = torch.einsum("nhsk,nhk->nhs", Q, K.sum(dim=2)) + 1e-8  # [N, n_head, seq_len]
+
+        # Normalize
+        out = out / denom.unsqueeze(-1)  # [N, n_head, seq_len, head_dim]
+
+        # Merge heads
+        out = out.permute(0, 2, 1, 3).contiguous().reshape(N, seq_len, self.n_embd)  # [N, seq_len, n_embd]
+        out = self.fc(out)  # [N, seq_len, n_embd]
+
+        return out, None  # Performer does not provide attention weights
+
+    def _feature_map(self, x):
+        # Random feature mapping: φ(x) = elu(x) + 1
+        return F.elu(self.random_projection(x)) + 1  # [N, n_head, seq_len, kernel_dim]
+    
 # Modify TransformerEncoderLayer and TransformerDecoderLayer to include the new attention methods
 class TransformerEncoderLayer(nn.Module):
     """A single Transformer encoder layer with selectable attention method."""
-    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8):
+    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8, kernel_dim=256, causal=False):
         super(TransformerEncoderLayer, self).__init__()
         if method == 'standard':
             self.self_attn = Attention(n_embd, n_head)
@@ -345,8 +407,10 @@ class TransformerEncoderLayer(nn.Module):
             self.self_attn = LocalAttention(n_embd, n_head, window_size)
         elif method == 'block':
             self.self_attn = BlockwiseAttention(n_embd, n_head, block_size)
+        elif method == 'performer':
+            self.self_attn = PerformerAttention(n_embd, n_head, kernel_dim=kernel_dim, causal=causal)
         else:
-            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', or 'block'.")
+            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', 'block', or 'performer'.")
 
         self.norm1 = nn.LayerNorm(n_embd)
         self.ffn = nn.Sequential(
@@ -369,25 +433,25 @@ class TransformerEncoderLayer(nn.Module):
 
 class TransformerEncoder(nn.Module):
     """Transformer Encoder consisting of multiple encoder layers."""
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='standard', window_size=4, block_size=8):
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='standard', window_size=4, block_size=8, kernel_dim=256, causal=False):
         super(TransformerEncoder, self).__init__()
         self.method = method
         self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(vocab_size, n_embd)  # Token embeddings
 
-        if method in ['standard', 'disentangled', 'local', 'block']:
+        if method in ['standard', 'disentangled', 'local', 'block', 'performer']:
             self.pos_emb = nn.Embedding(max_seq_len, n_embd)  # Positional embeddings
         # No positional embeddings for AliBi in the embedding layer
 
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size) for _ in range(n_layer)
+            TransformerEncoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size, kernel_dim, causal) for _ in range(n_layer)
         ])
         self.norm = nn.LayerNorm(n_embd)
 
     def forward(self, x, mask=None):
         N, seq_len = x.size()
         x = self.token_emb(x)
-        if self.method in ['standard', 'disentangled', 'local', 'block']:
+        if self.method in ['standard', 'disentangled', 'local', 'block', 'performer']:
             positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0)
             x = x + self.pos_emb(positions)  # Add positional embeddings
 
@@ -401,7 +465,7 @@ class TransformerEncoder(nn.Module):
 
 class TransformerDecoderLayer(nn.Module):
     """A single Transformer decoder layer with selectable attention method."""
-    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8):
+    def __init__(self, n_embd, n_head, method='standard', max_seq_len=512, window_size=4, block_size=8, kernel_dim=256, causal=False):
         super(TransformerDecoderLayer, self).__init__()
         if method == 'standard':
             self.self_attn = Attention(n_embd, n_head)
@@ -413,8 +477,10 @@ class TransformerDecoderLayer(nn.Module):
             self.self_attn = LocalAttention(n_embd, n_head, window_size)
         elif method == 'block':
             self.self_attn = BlockwiseAttention(n_embd, n_head, block_size)
+        elif method == 'performer':
+            self.self_attn = PerformerAttention(n_embd, n_head, kernel_dim=kernel_dim, causal=causal)
         else:
-            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', or 'block'.")
+            raise ValueError("Invalid method. Choose 'standard', 'alibi', 'disentangled', 'local', 'block', or 'performer'.")
 
         self.norm1 = nn.LayerNorm(n_embd)
         self.ffn = nn.Sequential(
@@ -437,18 +503,18 @@ class TransformerDecoderLayer(nn.Module):
 
 class TransformerDecoder(nn.Module):
     """Transformer Decoder consisting of multiple decoder layers."""
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='local', window_size=4, block_size=8):
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, max_seq_len, method='standard', window_size=4, block_size=8, kernel_dim=256, causal=False):
         super(TransformerDecoder, self).__init__()
         self.method = method
         self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(vocab_size, n_embd)  # Token embeddings
 
-        if method in ['standard', 'disentangled', 'local', 'block']:
+        if method in ['standard', 'disentangled', 'local', 'block', 'performer']:
             self.pos_emb = nn.Embedding(max_seq_len, n_embd)  # Positional embeddings
         # No positional embeddings for AliBi in the embedding layer
 
         self.layers = nn.ModuleList([
-            TransformerDecoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size) for _ in range(n_layer)
+            TransformerDecoderLayer(n_embd, n_head, method, max_seq_len, window_size, block_size, kernel_dim, causal) for _ in range(n_layer)
         ])
         self.norm = nn.LayerNorm(n_embd)
         self.fc_out = nn.Linear(n_embd, vocab_size)  # Output layer to predict next token
@@ -456,7 +522,7 @@ class TransformerDecoder(nn.Module):
     def forward(self, x, mask=None):
         N, seq_len = x.size()
         x = self.token_emb(x)
-        if self.method in ['standard', 'disentangled', 'local', 'block']:
+        if self.method in ['standard', 'disentangled', 'local', 'block', 'performer']:
             positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(N, seq_len)
             x = x + self.pos_emb(positions)  # Add positional embeddings
 
@@ -479,3 +545,17 @@ class TransformerDecoder(nn.Module):
         x = self.norm(x)
         x = self.fc_out(x)
         return x, weights_list  # Return logits and attention weights
+    
+class FNNClassifier(nn.Module):
+    """ Feedforward Neural Network Classifier """
+    def __init__(self, n_input, n_hidden, n_output):
+        super(FNNClassifier, self).__init__()
+        self.fc1 = nn.Linear(n_input, n_hidden)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(n_hidden, n_output)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x  # Output logits
