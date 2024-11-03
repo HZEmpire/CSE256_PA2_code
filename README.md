@@ -32,7 +32,7 @@ mv test_LM_wbush.txt speechesdataset/
 ```
 
 ## Usage
-You can run tasks corresponding to above mentioned four tasks by using the argument below:
+You can run tasks corresponding to above mentioned three tasks by using the argument below:
 
 Command-line Arguments:
 * --mode (-m): Specify the task to run. Options include part1, part2, and part3.
