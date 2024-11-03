@@ -35,28 +35,28 @@ mv test_LM_wbush.txt speechesdataset/
 You can run tasks corresponding to above mentioned four tasks by using the argument below:
 
 Command-line Arguments:
-* --mode (-m): Specify the task to run. Options include task1, task2, or task3.
+* --mode (-m): Specify the task to run. Options include part1, part2, and part3.
 
 ## Running the Tasks:
 * Task 1: Implementing Encoder, train and test the model on CLS task with visualizations of attention weights.
 ```bash
-python main.py --mode task1
+python main.py --mode part1
 # or
-python main.py -m task1
+python main.py -m part1
 ```
 
 * Task 2: Implementing Decoder, train and test the model on LM task with visualizations of attention weights.
 ```bash
-python main.py --mode task2
+python main.py --mode part2
 # or
-python main.py -m task2
+python main.py -m part2
 ```
 
 * Task 3: Implementing Special Requirements, train and test the model on both LM and CLS tasks, no visualizations.
 ```bash
-python main.py --mode task3
+python main.py --mode part3
 # or
-python main.py -m task3
+python main.py -m part3
 ```
 
 ## File Structure
